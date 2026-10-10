@@ -5,6 +5,9 @@ declare module 'gifenc' {
   }
 
   export interface GIFWriteOptions {
+    transparent?: boolean;
+    transparentIndex?: number;
+    dispose?: number;
     palette?: number[][];
     delay?: number;
     repeat?: number;

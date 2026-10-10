@@ -11,6 +11,32 @@ tags:
   - name: health
     description: Health operations
 paths:
+  /images/remove-background:
+    post:
+      operationId: removeBackground
+      tags: [images]
+      summary: Create a subject cutout with Gemini Nano Banana
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PhotoCutoutInput"
+      responses:
+        "200":
+          description: Alpha mask aligned to the supplied photo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PhotoCutout"
+        "400":
+          description: Invalid photo
+        "422":
+          description: Subject could not be isolated
+        "429":
+          description: Processing limit or provider quota reached
+        "503":
+          description: Gemini unavailable
   /healthz:
     get:
       operationId: healthCheck
@@ -26,6 +52,31 @@ paths:
                 $ref: "#/components/schemas/HealthStatus"
 components:
   schemas:
+    PhotoCutoutInput:
+      type: object
+      additionalProperties: false
+      required: [imageBase64]
+      properties:
+        imageBase64:
+          type: string
+          minLength: 4
+          maxLength: 3000000
+          pattern: '^[A-Za-z0-9+/]+={0,2}$'
+    PhotoCutout:
+      type: object
+      required: [width, height, alphaBase64]
+      properties:
+        width:
+          type: integer
+          minimum: 1
+          maximum: 1024
+        height:
+          type: integer
+          minimum: 1
+          maximum: 1024
+        alphaBase64:
+          type: string
+          description: One 8-bit alpha value per pixel, in row-major order
     HealthStatus:
       type: object
       properties:

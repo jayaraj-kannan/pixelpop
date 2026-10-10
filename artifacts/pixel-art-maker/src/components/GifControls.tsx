@@ -79,7 +79,7 @@ export function GifControls({
           </View>
         </View>
       ))}
-      <Text style={styles.note}>Preview updates automatically. Motion gently crops the photo to fill the frame.</Text>
+      <Text style={styles.note}>Preview updates automatically. Photos crop to fill the frame; cutouts keep transparent backgrounds.</Text>
     </View>
   );
 }

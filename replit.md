@@ -30,6 +30,7 @@ PixelPop turns photos into pixel-art PNGs and looping GIFs, then shares them thr
 ## Architecture decisions
 
 - Normal pixel editing and GIF animation stay on-device. The user approved sending photos to a processing service specifically for automatic AI background removal. Keep removal opt-in, explain that it uploads the selected photo, and do not upload photos during normal editing.
+- The user chose Gemini Nano Banana with their own API key for image-to-image background removal, not fal.ai or managed Gemini access. Keep that key server-side only. Generate an aligned subject mask and apply it to the original photo so the foreground pixels are preserved and exports have real alpha transparency.
 - Export PNG at up to 1024 pixels on the longest side and GIF at up to 512 pixels to keep sharing practical.
 - GIFs offer color pulse, bounce, sway, zoom, and wobble, with adjustable speed and strength. These are local full-photo transforms, not AI-generated subject motion. Nearest-neighbor sampling preserves pixel edges; motion gently crops to keep the canvas filled.
 - Use native sharing for installed compatible apps. Do not promise that every app will accept every format.

@@ -40,18 +40,19 @@ export function pixelate(image: RgbaImage, cellSize: number): RgbaImage {
       for (let sampleY = y; sampleY < endY; sampleY += Math.max(1, Math.floor(block / 3))) {
         for (let sampleX = x; sampleX < endX; sampleX += Math.max(1, Math.floor(block / 3))) {
           const offset = (sampleY * image.width + sampleX) * 4;
-          red += image.data[offset] ?? 0;
-          green += image.data[offset + 1] ?? 0;
-          blue += image.data[offset + 2] ?? 0;
-          alpha += image.data[offset + 3] ?? 255;
+          const sampleAlpha = image.data[offset + 3] ?? 255;
+          red += (image.data[offset] ?? 0) * sampleAlpha / 255;
+          green += (image.data[offset + 1] ?? 0) * sampleAlpha / 255;
+          blue += (image.data[offset + 2] ?? 0) * sampleAlpha / 255;
+          alpha += sampleAlpha;
           count++;
         }
       }
 
       const color = [
-        Math.round(red / count),
-        Math.round(green / count),
-        Math.round(blue / count),
+        alpha ? Math.round(red / (alpha / 255)) : 0,
+        alpha ? Math.round(green / (alpha / 255)) : 0,
+        alpha ? Math.round(blue / (alpha / 255)) : 0,
         Math.round(alpha / count),
       ];
       for (let fillY = y; fillY < endY; fillY++) {
@@ -66,6 +67,15 @@ export function pixelate(image: RgbaImage, cellSize: number): RgbaImage {
     }
   }
   return { width: image.width, height: image.height, data: result };
+}
+
+export function applyAlphaMask(image: RgbaImage, mask: Uint8Array): RgbaImage {
+  if (mask.length !== image.width * image.height) throw new Error('The cutout does not match this photo.');
+  const data = new Uint8Array(image.data);
+  for (let i = 0; i < mask.length; i++) {
+    data[i * 4 + 3] = Math.round((image.data[i * 4 + 3] ?? 255) * (mask[i] ?? 0) / 255);
+  }
+  return { width: image.width, height: image.height, data };
 }
 
 function uint32(value: number): Uint8Array {
@@ -167,6 +177,7 @@ export function renderGifFrame(
   const strength = STRENGTH[options.strength];
   const wave = Math.sin(phase) * strength;
   const output = new Uint8Array(image.data.length);
+  const transparent = image.data.some((value, index) => index % 4 === 3 && value < 255);
   if (options.effect === 'pulse') {
     for (let i = 0; i < image.data.length; i += 4) {
       output.set(pulseColor(Array.from(image.data.subarray(i, i + 3)), phase, strength), i);
@@ -183,7 +194,7 @@ export function renderGifFrame(
     ? 1 + (1 - Math.cos(phase)) * strength * 0.12
     : 1;
   // Overscan keeps the whole canvas filled when the photo moves or rotates.
-  const scale = Math.max(
+  const scale = transparent ? zoom : Math.max(
     zoom,
     (Math.abs(cosine) * image.width + Math.abs(sine) * image.height
       + 2 * Math.abs(cosine * dx + sine * dy)) / image.width,
@@ -194,12 +205,13 @@ export function renderGifFrame(
     for (let x = 0; x < image.width; x++) {
       const localX = x + 0.5 - image.width / 2 - dx;
       const localY = y + 0.5 - image.height / 2 - dy;
-      const sourceX = Math.max(0, Math.min(image.width - 1, Math.floor(
+      const sourceX = Math.floor(
         (cosine * localX + sine * localY) / scale + image.width / 2,
-      )));
-      const sourceY = Math.max(0, Math.min(image.height - 1, Math.floor(
+      );
+      const sourceY = Math.floor(
         (-sine * localX + cosine * localY) / scale + image.height / 2,
-      )));
+      );
+      if (sourceX < 0 || sourceY < 0 || sourceX >= image.width || sourceY >= image.height) continue;
       const source = (sourceY * image.width + sourceX) * 4;
       const target = (y * image.width + x) * 4;
       output[target] = image.data[source] ?? 0;
@@ -230,23 +242,47 @@ export function encodeGifBase64(
   }
   const gifImage: RgbaImage = { width, height, data: smallData };
   const encoder = GIFEncoder();
-  const basePalette = quantize(gifImage.data, 128);
-  const sourceIndices = applyPalette(gifImage.data, basePalette);
+  const transparent = smallData.some((value, index) => index % 4 === 3 && value < 128);
+  const paletteData = new Uint8Array(smallData);
+  if (transparent) {
+    for (let i = 0; i < paletteData.length; i += 4) {
+      if (paletteData[i + 3]! < 128) paletteData.fill(0, i, i + 3);
+    }
+  }
+  const colorPalette = quantize(paletteData, transparent ? 127 : 128);
+  // GIF's logical background is index 0. Reserve it for transparency so disposal
+  // clears to transparent, while keeping real black subject pixels opaque.
+  const transparentIndex = 0;
+  const basePalette = transparent ? [[0, 0, 0], ...colorPalette] : colorPalette;
+  const markTransparent = (indices: Uint8Array, rgba: Uint8Array) => {
+    if (transparent) {
+      for (let i = 0; i < indices.length; i++) {
+        indices[i] = rgba[i * 4 + 3]! < 128 ? transparentIndex : indices[i]! + 1;
+      }
+    }
+    return indices;
+  };
+  const sourceIndices = applyPalette(gifImage.data, colorPalette);
+  markTransparent(sourceIndices, gifImage.data);
   const delay = LOOP_DURATION[options.speed] / GIF_FRAME_COUNT;
   for (let frame = 0; frame < GIF_FRAME_COUNT; frame++) {
     const isPulse = options.effect === 'pulse';
     const palette = isPulse
-      ? basePalette.map((color) => pulseColor(
-        color, (frame / GIF_FRAME_COUNT) * Math.PI * 2, STRENGTH[options.strength],
-      ))
+      ? basePalette.map((color, index) => transparent && index === transparentIndex ? color : pulseColor(
+          color, (frame / GIF_FRAME_COUNT) * Math.PI * 2, STRENGTH[options.strength],
+        ))
       : basePalette;
+    const rgba = isPulse ? gifImage.data : renderGifFrame(gifImage, frame, options);
     const indexed = isPulse
       ? sourceIndices
-      : applyPalette(renderGifFrame(gifImage, frame, options), palette);
+      : markTransparent(applyPalette(rgba, colorPalette), rgba);
     encoder.writeFrame(indexed, width, height, {
       palette,
       delay,
       repeat: frame === 0 ? 0 : undefined,
+      transparent,
+      transparentIndex: transparent ? transparentIndex : undefined,
+      dispose: transparent ? 2 : undefined,
     });
   }
   encoder.finish();

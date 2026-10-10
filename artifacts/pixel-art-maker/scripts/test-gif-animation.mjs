@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { encodeGifBase64, renderGifFrame } from '../src/lib/pixel-art.ts';
+import { inflateSync } from 'node:zlib';
+import { applyAlphaMask, pixelate, encodePngBase64, encodeGifBase64, renderGifFrame } from '../src/lib/pixel-art.ts';
 
 function sample(width = 64, height = 48) {
   const data = new Uint8Array(width * height * 4);
@@ -26,6 +27,9 @@ function inspectGif(base64) {
     offset += size;
   }
   let delay = 0;
+  let transparent = false;
+  let disposal = 0;
+  let transparentIndex = 0;
   let repeats = null;
   const frames = [];
   const blocks = () => {
@@ -47,9 +51,12 @@ function inspectGif(base64) {
       const label = bytes[offset++];
       if (label === 0xf9) {
         assert.equal(bytes[offset++], 4);
-        offset++;
+        const flags = bytes[offset++];
+        transparent = Boolean(flags & 1);
+        disposal = (flags >> 2) & 7;
         delay = bytes.readUInt16LE(offset) * 10;
-        offset += 3;
+        offset += 2;
+        transparentIndex = bytes[offset++];
         assert.equal(bytes[offset++], 0);
       } else if (label === 0xff) {
         const length = bytes[offset++];
@@ -72,7 +79,8 @@ function inspectGif(base64) {
         offset += size;
       }
       assert.ok(bytes[offset++] >= 2, 'Invalid LZW code size');
-      frames.push({ delay, signature: Buffer.concat([palette, blocks()]).toString('base64') });
+      assert.ok(!transparent || transparentIndex * 3 < palette.length);
+      frames.push({ delay, transparent, disposal, transparentIndex, signature: Buffer.concat([palette, blocks()]).toString('base64') });
     } else {
       throw Error(`Unexpected GIF marker: ${marker}`);
     }
@@ -120,4 +128,36 @@ const large = inspectGif(encodeGifBase64(sample(1024, 512), {
 }));
 assert.equal(large.width, 512);
 assert.equal(large.height, 256);
+const mask = new Uint8Array(image.width * image.height);
+for (let y = 12; y < 36; y++) {
+  for (let x = 16; x < 48; x++) mask[y * image.width + x] = 255;
+}
+const cutout = applyAlphaMask(image, mask);
+assert.equal(image.data[3], 255, 'Cutout must not mutate the source photo');
+assert.equal(cutout.data[3], 0);
+const subjectOffset = (24 * image.width + 32) * 4;
+assert.deepEqual(cutout.data.subarray(subjectOffset, subjectOffset + 4), image.data.subarray(subjectOffset, subjectOffset + 4));
+assert.throws(() => applyAlphaMask(image, new Uint8Array(1)), /does not match/);
+const edge = pixelate({
+  width: 2, height: 2,
+  data: new Uint8Array([255, 0, 0, 255, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0]),
+}, 2);
+assert.deepEqual(Array.from(edge.data.subarray(0, 4)), [255, 0, 0, 64], 'Transparent colors must not bleed into the subject');
+for (const effect of ['pulse', 'bounce', 'sway', 'zoom', 'wobble']) {
+  const gif = inspectGif(encodeGifBase64(cutout, { effect, speed: 'normal', strength: 'bold' }));
+  assert.ok(gif.frames.every((frame) => frame.transparent && frame.disposal === 2 && frame.transparentIndex === 0),
+    'Transparent GIF frames must clear between movements to prevent trails');
+  assert.ok(renderGifFrame(cutout, 3, { effect, speed: 'normal', strength: 'bold' })[3] === 0);
+}
+const png = Buffer.from(encodePngBase64(cutout), 'base64');
+const chunks = [];
+for (let offset = 8; offset < png.length;) {
+  const length = png.readUInt32BE(offset);
+  if (png.subarray(offset + 4, offset + 8).toString() === 'IDAT') chunks.push(png.subarray(offset + 8, offset + 8 + length));
+  offset += length + 12;
+}
+const rows = inflateSync(Buffer.concat(chunks));
+assert.equal(rows[4], 0, 'PNG background must be transparent');
+assert.equal(rows[24 * (image.width * 4 + 1) + 1 + 32 * 4 + 3], 255, 'PNG subject must remain opaque');
 console.log(`Passed ${combinations} GIF settings, loop timing, motion strength, filled frames, and 512px export limit.`);
+console.log('Passed subject preservation, transparent PNG/GIF, alpha-weighted pixels, and GIF disposal checks.');

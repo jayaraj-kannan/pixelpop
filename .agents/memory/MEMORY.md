@@ -1,2 +1,3 @@
 - [Bundled mobile images](bundled-mobile-images.md) — use Expo Asset for cross-platform sample loading; React Native Web lacks Image.resolveAssetSource.
 - [GIF codec imports](gif-codec-imports.md) — gifenc exposes different default-import shapes in Node and Metro; preserve the cross-runtime namespace selection.
+- [Gemini SDK routing](gemini-sdk-routing.md) — an explicit API key does not override SDK base-URL defaults; own-key calls must select the direct provider endpoint.

@@ -8,6 +8,8 @@ import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Buffer } from 'buffer';
+import { removeBackground, useRemoveBackground } from '@workspace/api-client-react';
 import {
   ActivityIndicator,
   Alert,
@@ -22,7 +24,9 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors } from '@/hooks/useColors';
 import { GifControls } from '@/src/components/GifControls';
+import { BackgroundControls, TransparencyGrid } from '@/src/components/BackgroundControls';
 import {
+  applyAlphaMask,
   DEFAULT_GIF_OPTIONS,
   decodeJpeg,
   encodeGifBase64,
@@ -43,6 +47,7 @@ type RecentCreation = {
   uri: string;
   format: ExportFormat;
   createdAt: number;
+  transparent?: boolean;
 };
 
 type Sample = {
@@ -71,6 +76,9 @@ export default function PixelArtHome() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const originalRef = useRef<RgbaImage | null>(null);
+  const sourcePhotoRef = useRef<RgbaImage | null>(null);
+  const photoBase64Ref = useRef<string | null>(null);
+  const cutoutRef = useRef<RgbaImage | null>(null);
   const processedRef = useRef<RgbaImage | null>(null);
   const pixelSizeRef = useRef(18);
   const formatRef = useRef<ExportFormat>('png');
@@ -83,10 +91,26 @@ export default function PixelArtHome() {
   const [pixelSize, setPixelSize] = useState(18);
   const [format, setFormat] = useState<ExportFormat>('png');
   const [isLoading, setIsLoading] = useState(false);
+  const [hasCutout, setHasCutout] = useState(false);
+  const [isRemovingBackground, setIsRemovingBackground] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
   const [status, setStatus] = useState('');
   const [recent, setRecent] = useState<RecentCreation[]>([]);
+  const backgroundMutation = useRemoveBackground({
+    mutation: {
+      retry: false,
+      mutationFn: async ({ data }) => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 105_000);
+        try {
+          return await removeBackground(data, { signal: controller.signal });
+        } finally {
+          clearTimeout(timeout);
+        }
+      },
+    },
+  });
 
   const createPreview = useCallback((source: RgbaImage, nextPixelSize: number) => {
     const result = pixelate(source, nextPixelSize);
@@ -117,9 +141,13 @@ export default function PixelArtHome() {
           throw new Error('This photo could not be prepared. Try another image.');
         }
         const decoded = decodeJpeg(manipulated.base64);
-        originalRef.current = decoded;
-        setImageName(title);
         createPreview(decoded, pixelSizeRef.current);
+        originalRef.current = decoded;
+        sourcePhotoRef.current = decoded;
+        photoBase64Ref.current = manipulated.base64;
+        cutoutRef.current = null;
+        setHasCutout(false);
+        setImageName(title);
         await Haptics.selectionAsync();
       } catch (error) {
         const message = error instanceof Error ? error.message : 'The photo could not be opened.';
@@ -241,6 +269,45 @@ export default function PixelArtHome() {
     }
   };
 
+  const changeBackground = async () => {
+    const source = sourcePhotoRef.current;
+    const imageBase64 = photoBase64Ref.current;
+    if (!source || !imageBase64 || isLoading || isExporting || selectedSavedUri) return;
+    setIsLoading(true);
+    setStatus('');
+    try {
+      let nextSource = source;
+      if (!hasCutout) {
+        if (!cutoutRef.current) {
+          if (!process.env.EXPO_PUBLIC_DOMAIN) {
+            throw new Error('The AI service address is not configured for this app.');
+          }
+          setIsRemovingBackground(true);
+          const mask = await backgroundMutation.mutateAsync({ data: { imageBase64 } });
+          if (mask.width !== source.width || mask.height !== source.height) {
+            throw new Error('The cutout did not match your photo. Please try another image.');
+          }
+          cutoutRef.current = applyAlphaMask(source, Buffer.from(mask.alphaBase64, 'base64'));
+        }
+        nextSource = cutoutRef.current;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      createPreview(nextSource, pixelSizeRef.current);
+      originalRef.current = nextSource;
+      setHasCutout(!hasCutout);
+      setStatus(hasCutout ? 'Original background restored.' : 'Background removed. Check the subject edges before sharing.');
+    } catch (error) {
+      const message = error instanceof Error && error.name === 'AbortError'
+        ? 'Background removal took too long. Please try again later.'
+        : error instanceof Error ? error.message : 'Background removal failed. Your original photo is unchanged.';
+      setStatus(message);
+      Alert.alert('Could not remove background', message);
+    } finally {
+      setIsRemovingBackground(false);
+      setIsLoading(false);
+    }
+  };
+
   const shareUri = async (uri: string, selectedFormat: ExportFormat) => {
     if (Platform.OS === 'web') {
       const webNavigator = globalThis.navigator as Navigator & {
@@ -318,6 +385,7 @@ export default function PixelArtHome() {
           uri,
           format,
           createdAt: Date.now(),
+          transparent: hasCutout,
         };
         const updated = [newCreation, ...recent].slice(0, 12);
         setRecent(updated);
@@ -337,6 +405,10 @@ export default function PixelArtHome() {
   const selectRecent = (item: RecentCreation) => {
     if (isLoading || isExporting) return;
     originalRef.current = null;
+    sourcePhotoRef.current = null;
+    photoBase64Ref.current = null;
+    cutoutRef.current = null;
+    setHasCutout(Boolean(item.transparent));
     processedRef.current = null;
     previewBase64Ref.current = null;
     setSelectedSavedUri(item.uri);
@@ -371,7 +443,7 @@ export default function PixelArtHome() {
           </View>
           <View style={styles.privateBadge}>
             <View style={styles.privateDot} />
-            <Text style={styles.privateText}>ON DEVICE</Text>
+            <Text style={styles.privateText}>LOCAL + AI</Text>
           </View>
         </View>
 
@@ -383,6 +455,7 @@ export default function PixelArtHome() {
 
         <View style={styles.previewCard}>
           <View style={styles.previewImageWrap}>
+            {hasCutout && <TransparencyGrid />}
             {previewUri ? (
               <ExpoImage
                 source={{ uri: previewUri }}
@@ -402,7 +475,9 @@ export default function PixelArtHome() {
             {isLoading && (
               <View style={styles.loadingOverlay}>
                 <ActivityIndicator size="large" color={colors.primary} />
-                <Text style={styles.loadingText}>Making pixels…</Text>
+                <Text style={styles.loadingText}>
+                  {isRemovingBackground ? 'Gemini is isolating the subject…' : 'Making pixels…'}
+                </Text>
               </View>
             )}
             {previewUri && (
@@ -430,6 +505,15 @@ export default function PixelArtHome() {
             </Pressable>
           </View>
         </View>
+
+        {!selectedSavedUri && (
+          <BackgroundControls
+            removed={hasCutout}
+            busy={isRemovingBackground}
+            disabled={isLoading || isExporting || !sourcePhotoRef.current}
+            onPress={() => void changeBackground()}
+          />
+        )}
 
         <View style={styles.sampleRow}>
           <Text style={styles.sectionLabel}>TRY A SAMPLE</Text>
@@ -624,7 +708,7 @@ export default function PixelArtHome() {
 
         <View style={styles.privacyNote}>
           <Feather name="lock" size={13} color={colors.mutedForeground} />
-          <Text style={styles.privacyText}>Your photos stay on your device.</Text>
+          <Text style={styles.privacyText}>Pixel effects stay local. AI cutouts send photos to Gemini.</Text>
         </View>
       </ScrollView>
     </View>
@@ -774,7 +858,7 @@ function makeStyles(colors: ReturnType<typeof useColors>) {
     recentFormat: { position: 'absolute', right: 5, bottom: 5, backgroundColor: colors.background, borderRadius: 6, paddingHorizontal: 5, paddingVertical: 3 },
     recentFormatText: { color: colors.foreground, fontSize: 8, fontWeight: '800' },
     privacyNote: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6, marginTop: 23 },
-    privacyText: { color: colors.mutedForeground, fontSize: 11, fontWeight: '500' },
+    privacyText: { color: colors.mutedForeground, fontSize: 11, fontWeight: '500', flexShrink: 1, textAlign: 'center', lineHeight: 17 },
     pressed: { opacity: 0.8, transform: [{ scale: 0.985 }] },
   });
 }
