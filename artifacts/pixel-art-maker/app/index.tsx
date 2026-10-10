@@ -1,6 +1,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Feather, Ionicons } from '@expo/vector-icons';
+import { Asset } from 'expo-asset';
 import * as Haptics from 'expo-haptics';
+import { Image as ExpoImage } from 'expo-image';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -10,7 +12,6 @@ import {
   ActivityIndicator,
   Alert,
   Image,
-  ImageSourcePropType,
   Platform,
   Pressable,
   ScrollView,
@@ -26,7 +27,7 @@ import {
   encodePngBase64,
   pixelate,
   type RgbaImage,
-} from '@/lib/pixel-art';
+} from '@/src/lib/pixel-art';
 
 const HISTORY_KEY = 'pixel-pop:recent-v1';
 const CELL_MIN = 6;
@@ -43,12 +44,12 @@ type RecentCreation = {
 
 type Sample = {
   title: string;
-  image: ImageSourcePropType;
+  image: number;
 };
 
 const SAMPLES: Sample[] = [
-  { title: 'Window cat', image: require('../assets/images/demo-cat.png') },
-  { title: 'Coastal day', image: require('../assets/images/demo-coast.png') },
+  { title: 'Window cat', image: require('../assets/images/demo-cat.jpg') },
+  { title: 'Coastal day', image: require('../assets/images/demo-coast.jpg') },
 ];
 
 function resizeActions(width: number, height: number) {
@@ -68,8 +69,9 @@ export default function PixelArtHome() {
   const insets = useSafeAreaInsets();
   const originalRef = useRef<RgbaImage | null>(null);
   const processedRef = useRef<RgbaImage | null>(null);
+  const pixelSizeRef = useRef(18);
+  const formatRef = useRef<ExportFormat>('png');
   const [previewUri, setPreviewUri] = useState<string | null>(null);
-  const [selectedUri, setSelectedUri] = useState<string | null>(null);
   const [selectedSavedUri, setSelectedSavedUri] = useState<string | null>(null);
   const [imageName, setImageName] = useState('Window cat');
   const [pixelSize, setPixelSize] = useState(18);
@@ -83,7 +85,9 @@ export default function PixelArtHome() {
   const createPreview = useCallback((source: RgbaImage, nextPixelSize: number) => {
     const result = pixelate(source, nextPixelSize);
     processedRef.current = result;
-    setPreviewUri(`data:image/png;base64,${encodePngBase64(result)}`);
+    const activeFormat = formatRef.current;
+    const base64 = activeFormat === 'gif' ? encodeGifBase64(result) : encodePngBase64(result);
+    setPreviewUri(`data:image/${activeFormat};base64,${base64}`);
     setIsDirty(false);
     setSelectedSavedUri(null);
   }, []);
@@ -105,9 +109,8 @@ export default function PixelArtHome() {
         }
         const decoded = decodeJpeg(manipulated.base64);
         originalRef.current = decoded;
-        setSelectedUri(uri);
         setImageName(title);
-        createPreview(decoded, pixelSize);
+        createPreview(decoded, pixelSizeRef.current);
         await Haptics.selectionAsync();
       } catch (error) {
         const message = error instanceof Error ? error.message : 'The photo could not be opened.';
@@ -117,47 +120,58 @@ export default function PixelArtHome() {
         setIsLoading(false);
       }
     },
-    [createPreview, pixelSize],
+    [createPreview],
   );
 
   const loadSample = useCallback(
     async (sample: Sample) => {
-      const moduleId = Image.resolveAssetSource(sample.image);
-      if (!moduleId?.uri) {
+      try {
+        const asset = Asset.fromModule(sample.image);
+        await asset.downloadAsync();
+        const dimensions = asset.width && asset.height
+          ? { width: asset.width, height: asset.height }
+          : undefined;
+        await loadImage(asset.localUri ?? asset.uri, sample.title, dimensions);
+      } catch {
         setStatus('The sample image is unavailable. Choose a photo from your library instead.');
-        return;
       }
-      await loadImage(moduleId.uri, sample.title);
     },
     [loadImage],
   );
 
   useEffect(() => {
-    const firstSample = Image.resolveAssetSource(SAMPLES[0]!.image);
-    if (firstSample?.uri) void loadImage(firstSample.uri, SAMPLES[0]!.title);
+    void loadSample(SAMPLES[0]!);
     void AsyncStorage.getItem(HISTORY_KEY)
       .then((value) => {
         if (value) setRecent(JSON.parse(value) as RecentCreation[]);
       })
       .catch(() => setStatus('Your recent creations could not be loaded.'));
-  }, [loadImage]);
+  }, [loadSample]);
 
   const choosePhoto = useCallback(async () => {
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
-      allowsEditing: true,
-      quality: 1,
-    });
-    if (result.canceled || !result.assets[0]) return;
-    const asset = result.assets[0];
-    await loadImage(asset.uri, asset.fileName?.replace(/\.[^.]+$/, '') || 'My photo', {
-      width: asset.width,
-      height: asset.height,
-    });
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsEditing: true,
+        quality: 1,
+      });
+      if (result.canceled || !result.assets[0]) return;
+      const asset = result.assets[0];
+      await loadImage(asset.uri, asset.fileName?.replace(/\.[^.]+$/, '') || 'My photo', {
+        width: asset.width,
+        height: asset.height,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Photo access is unavailable.';
+      setStatus(message);
+      Alert.alert('Could not choose photo', message);
+    }
   }, [loadImage]);
 
   const adjustPixelSize = (change: number) => {
+    if (!originalRef.current) return;
     const nextValue = Math.max(CELL_MIN, Math.min(CELL_MAX, pixelSize + change));
+    pixelSizeRef.current = nextValue;
     setPixelSize(nextValue);
     setIsDirty(true);
     setSelectedSavedUri(null);
@@ -171,6 +185,23 @@ export default function PixelArtHome() {
     try {
       createPreview(original, pixelSize);
       await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const changeFormat = async (value: ExportFormat) => {
+    if (selectedSavedUri || format === value) return;
+    setFormat(value);
+    formatRef.current = value;
+    const pixels = processedRef.current;
+    if (!pixels) return;
+    setIsLoading(true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    try {
+      const base64 = value === 'gif' ? encodeGifBase64(pixels) : encodePngBase64(pixels);
+      setPreviewUri(`data:image/${value};base64,${base64}`);
+      await Haptics.selectionAsync();
     } finally {
       setIsLoading(false);
     }
@@ -193,7 +224,7 @@ export default function PixelArtHome() {
         link.href = URL.createObjectURL(blob);
         link.download = `pixel-pop.${selectedFormat}`;
         link.click();
-        URL.revokeObjectURL(link.href);
+        setTimeout(() => URL.revokeObjectURL(link.href), 1000);
       }
       return;
     }
@@ -236,6 +267,9 @@ export default function PixelArtHome() {
       if (Platform.OS === 'web') {
         uri = `data:${mimeType};base64,${base64}`;
       } else {
+        if (!FileSystem.documentDirectory) {
+          throw new Error('Device storage is unavailable. Please try again.');
+        }
         const folder = `${FileSystem.documentDirectory}PixelPop/`;
         await FileSystem.makeDirectoryAsync(folder, { intermediates: true });
         const filename = `pixel-pop-${Date.now()}.${format}`;
@@ -268,10 +302,10 @@ export default function PixelArtHome() {
     originalRef.current = null;
     processedRef.current = null;
     setSelectedSavedUri(item.uri);
-    setSelectedUri(item.uri);
     setPreviewUri(item.uri);
     setImageName('Recent creation');
     setFormat(item.format);
+    formatRef.current = item.format;
     setIsDirty(false);
   };
 
@@ -312,10 +346,10 @@ export default function PixelArtHome() {
         <View style={styles.previewCard}>
           <View style={styles.previewImageWrap}>
             {previewUri ? (
-              <Image
+              <ExpoImage
                 source={{ uri: previewUri }}
                 style={styles.previewImage}
-                resizeMode="contain"
+                contentFit="contain"
                 accessibilityLabel={`${imageName} pixel art preview`}
               />
             ) : (
@@ -350,9 +384,11 @@ export default function PixelArtHome() {
               accessibilityLabel="Choose a photo"
               testID="choose-photo"
               onPress={() => void choosePhoto()}
+              disabled={isLoading || isExporting}
               style={({ pressed }) => [styles.changePhotoButton, pressed && styles.pressed]}
             >
               <Feather name="image" size={17} color={colors.foreground} />
+              <Text style={styles.changePhotoText}>Use a photo</Text>
             </Pressable>
           </View>
         </View>
@@ -367,6 +403,7 @@ export default function PixelArtHome() {
                 accessibilityLabel={`Try ${sample.title} sample`}
                 testID={`sample-${sample.title.toLowerCase().replaceAll(' ', '-')}`}
                 onPress={() => void loadSample(sample)}
+                disabled={isLoading || isExporting}
                 style={({ pressed }) => [styles.sampleButton, pressed && styles.pressed]}
               >
                 <Image source={sample.image} style={styles.sampleImage} />
@@ -394,11 +431,11 @@ export default function PixelArtHome() {
               accessibilityLabel="Make pixels finer"
               testID="pixel-size-decrease"
               onPress={() => adjustPixelSize(-3)}
-              disabled={pixelSize <= CELL_MIN}
+              disabled={!originalRef.current || Boolean(selectedSavedUri) || pixelSize <= CELL_MIN}
               style={({ pressed }) => [
                 styles.adjustButton,
                 pressed && styles.pressed,
-                pixelSize <= CELL_MIN && styles.disabledButton,
+                (!originalRef.current || selectedSavedUri || pixelSize <= CELL_MIN) && styles.disabledButton,
               ]}
             >
               <Feather name="minus" size={17} color={colors.foreground} />
@@ -428,11 +465,11 @@ export default function PixelArtHome() {
               accessibilityLabel="Make pixels chunkier"
               testID="pixel-size-increase"
               onPress={() => adjustPixelSize(3)}
-              disabled={pixelSize >= CELL_MAX}
+              disabled={!originalRef.current || Boolean(selectedSavedUri) || pixelSize >= CELL_MAX}
               style={({ pressed }) => [
                 styles.adjustButton,
                 pressed && styles.pressed,
-                pixelSize >= CELL_MAX && styles.disabledButton,
+                (!originalRef.current || selectedSavedUri || pixelSize >= CELL_MAX) && styles.disabledButton,
               ]}
             >
               <Feather name="plus" size={17} color={colors.foreground} />
@@ -450,11 +487,13 @@ export default function PixelArtHome() {
                   accessibilityRole="button"
                   accessibilityState={{ selected: format === value }}
                   testID={`format-${value}`}
-                  onPress={() => {
-                    setFormat(value);
-                    setSelectedSavedUri(null);
-                  }}
-                  style={[styles.formatOption, format === value && styles.formatOptionActive]}
+                  onPress={() => void changeFormat(value)}
+                  disabled={Boolean(selectedSavedUri) || isLoading || isExporting}
+                  style={[
+                    styles.formatOption,
+                    format === value && styles.formatOptionActive,
+                    selectedSavedUri && styles.disabledButton,
+                  ]}
                 >
                   <Text style={[styles.formatText, format === value && styles.formatTextActive]}>
                     {value.toUpperCase()}
@@ -464,6 +503,10 @@ export default function PixelArtHome() {
             </View>
           </View>
         </View>
+
+        {format === 'gif' && (
+          <Text style={styles.gifHint}>GIF adds a gentle, looping color pulse.</Text>
+        )}
 
         {isDirty && (
           <Pressable
@@ -482,11 +525,11 @@ export default function PixelArtHome() {
           accessibilityLabel={format === 'gif' ? 'Export and share GIF' : 'Export and share PNG'}
           testID="export-share"
           onPress={() => void exportAndShare()}
-          disabled={isLoading || isExporting || !previewUri}
+          disabled={isLoading || isExporting || !previewUri || isDirty}
           style={({ pressed }) => [
             styles.exportButton,
             pressed && styles.pressed,
-            (isLoading || isExporting || !previewUri) && styles.disabledExport,
+            (isLoading || isExporting || !previewUri || isDirty) && styles.disabledExport,
           ]}
         >
           {isExporting ? (
@@ -495,7 +538,11 @@ export default function PixelArtHome() {
             <Feather name="send" size={18} color={colors.primaryForeground} />
           )}
           <Text style={styles.exportText}>
-            {isExporting ? 'Preparing your art…' : `Export & share ${format.toUpperCase()}`}
+            {isExporting
+              ? 'Preparing your art…'
+              : isDirty
+                ? 'Update preview to export'
+                : `Export & share ${format.toUpperCase()}`}
           </Text>
           {!isExporting && <Feather name="arrow-up-right" size={17} color={colors.primaryForeground} />}
         </Pressable>
@@ -518,7 +565,7 @@ export default function PixelArtHome() {
                   onPress={() => selectRecent(item)}
                   style={({ pressed }) => [styles.recentItem, pressed && styles.pressed]}
                 >
-                  <Image source={{ uri: item.uri }} style={styles.recentImage} />
+                  <ExpoImage source={{ uri: item.uri }} style={styles.recentImage} contentFit="cover" />
                   <View style={styles.recentFormat}>
                     <Text style={styles.recentFormatText}>{item.format.toUpperCase()}</Text>
                   </View>
@@ -555,7 +602,7 @@ function makeStyles(colors: ReturnType<typeof useColors>) {
       transform: [{ rotate: '-6deg' }],
     },
     markPixel: { width: 5, height: 11, borderRadius: 1, backgroundColor: colors.primaryForeground },
-    markPixelSmall: { width: 5, height: 6, borderRadius: 1, backgroundColor: '#FFD789' },
+    markPixelSmall: { width: 5, height: 6, borderRadius: 1, backgroundColor: colors.highlight },
     brandName: { color: colors.foreground, fontSize: 20, fontWeight: '800', letterSpacing: -0.8 },
     privateBadge: {
       flexDirection: 'row',
@@ -596,7 +643,7 @@ function makeStyles(colors: ReturnType<typeof useColors>) {
     emptyIcon: { width: 58, height: 58, borderRadius: 20, backgroundColor: colors.surfaceAccent, alignItems: 'center', justifyContent: 'center', marginBottom: 14 },
     emptyTitle: { color: colors.foreground, fontSize: 17, fontWeight: '700', marginBottom: 5 },
     emptySubtitle: { color: colors.mutedForeground, fontSize: 13, textAlign: 'center' },
-    loadingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: `${colors.background}CC`, alignItems: 'center', justifyContent: 'center', gap: 10 },
+    loadingOverlay: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, backgroundColor: `${colors.background}CC`, alignItems: 'center', justifyContent: 'center', gap: 10 },
     loadingText: { color: colors.foreground, fontSize: 13, fontWeight: '600' },
     previewTag: {
       position: 'absolute',
@@ -616,7 +663,8 @@ function makeStyles(colors: ReturnType<typeof useColors>) {
     photoNameWrap: { flex: 1, paddingRight: 12 },
     photoLabel: { color: colors.mutedForeground, fontSize: 9, fontWeight: '800', letterSpacing: 1.2 },
     photoName: { color: colors.foreground, fontSize: 15, fontWeight: '700', marginTop: 4 },
-    changePhotoButton: { width: 42, height: 42, borderRadius: 14, backgroundColor: colors.surfaceAccent, alignItems: 'center', justifyContent: 'center' },
+    changePhotoButton: { height: 42, paddingHorizontal: 10, gap: 6, flexDirection: 'row', borderRadius: 14, backgroundColor: colors.surfaceAccent, alignItems: 'center', justifyContent: 'center' },
+    changePhotoText: { color: colors.foreground, fontSize: 11, fontWeight: '700' },
     sampleRow: { marginBottom: 22 },
     sectionLabel: { color: colors.mutedForeground, fontSize: 9, fontWeight: '800', letterSpacing: 1.4 },
     samples: { flexDirection: 'row', gap: 9, marginTop: 10 },
@@ -663,6 +711,7 @@ function makeStyles(colors: ReturnType<typeof useColors>) {
     formatOptionActive: { backgroundColor: colors.foreground },
     formatText: { color: colors.mutedForeground, fontSize: 10, fontWeight: '800', letterSpacing: 0.6 },
     formatTextActive: { color: colors.card },
+    gifHint: { color: colors.mutedForeground, fontSize: 11, textAlign: 'center', marginBottom: 13 },
     updateButton: { borderRadius: 15, backgroundColor: colors.secondary, minHeight: 48, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 9, marginBottom: 11 },
     updateText: { color: colors.primaryForeground, fontSize: 14, fontWeight: '700' },
     exportButton: { borderRadius: 16, backgroundColor: colors.primary, minHeight: 56, paddingHorizontal: 17, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 11 },

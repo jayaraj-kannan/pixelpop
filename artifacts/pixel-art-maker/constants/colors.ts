@@ -52,6 +52,7 @@ const colors = {
     success: '#439575',
     preview: '#f2e8d8',
     surfaceAccent: '#f4efe6',
+    highlight: '#ffd789',
   },
 
   dark: {
@@ -76,6 +77,7 @@ const colors = {
     success: '#68b997',
     preview: '#302c30',
     surfaceAccent: '#39353d',
+    highlight: '#ffd789',
   },
 
   // Border radius (in px). Sync from the sibling web artifact's --radius

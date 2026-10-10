@@ -1,10 +1,15 @@
 {
   "expo": {
-    "name": "Pixel Art Maker",
+    "name": "PixelPop",
     "slug": "pixel-art-maker",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
+    "splash": {
+      "image": "./assets/images/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#fffaf1"
+    },
     "scheme": "pixel-art-maker",
     "userInterfaceStyle": "automatic",
     "ios": {
@@ -16,7 +21,8 @@
     },
     "plugins": [
       "expo-router",
-      "expo-sharing"
+      "expo-sharing",
+      "expo-asset"
     ],
     "experiments": {
       "typedRoutes": true,

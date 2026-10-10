@@ -32,4 +32,10 @@ declare module 'gifenc' {
     palette: number[][],
     format?: string,
   ): Uint8Array;
+  const gifenc: {
+    GIFEncoder: typeof GIFEncoder;
+    quantize: typeof quantize;
+    applyPalette: typeof applyPalette;
+  };
+  export default gifenc;
 }

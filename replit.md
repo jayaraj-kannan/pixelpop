@@ -1,6 +1,6 @@
-# [Project name]
+# PixelPop
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+PixelPop turns photos into pixel-art PNGs and looping GIFs, then shares them through the device's native share sheet.
 
 ## Run & Operate
 
@@ -22,15 +22,24 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- Mobile app: `artifacts/pixel-art-maker`
+- Editor: `artifacts/pixel-art-maker/app/index.tsx`
+- Image conversion and binary export: `artifacts/pixel-art-maker/src/lib/pixel-art.ts`
+- Mobile theme: `artifacts/pixel-art-maker/constants/colors.ts`
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Process photos on-device; no photo-upload API is used. Keep this privacy promise when adding features.
+- Export PNG at up to 1024 pixels on the longest side and GIF at up to 512 pixels to keep sharing practical.
+- GIFs use a looping color pulse rather than inventing motion within a still photo.
+- Use native sharing for installed compatible apps. Do not promise that every app will accept every format.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Choose a photo from the native library or try a bundled sample.
+- Adjust the pixel block size and preview the result.
+- Export PNG or animated GIF and open the device share sheet.
+- Keep the latest 12 native exports locally for sharing again.
 
 ## User preferences
 

@@ -1,0 +1,2 @@
+- [Bundled mobile images](bundled-mobile-images.md) — use Expo Asset for cross-platform sample loading; React Native Web lacks Image.resolveAssetSource.
+- [GIF codec imports](gif-codec-imports.md) — gifenc exposes different default-import shapes in Node and Metro; preserve the cross-runtime namespace selection.

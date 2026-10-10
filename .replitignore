@@ -3,3 +3,8 @@
 
 # No need to store the pnpm store twice.
 .local
+
+# Raw generated images; the mobile app uses compact bundled copies.
+/attached_assets/generated_images/
+/artifacts/pixel-art-maker/assets/images/demo-cat.png
+/artifacts/pixel-art-maker/assets/images/demo-coast.png

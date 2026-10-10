@@ -1,7 +1,12 @@
 import { Buffer } from 'buffer';
-import { applyPalette, GIFEncoder, quantize } from 'gifenc';
+import * as GifPackage from 'gifenc';
 import { decode } from 'jpeg-js';
 import { deflate } from 'pako';
+
+const gifenc = typeof GifPackage.GIFEncoder === 'function'
+  ? GifPackage
+  : GifPackage.default;
+const { applyPalette, GIFEncoder, quantize } = gifenc;
 
 export interface RgbaImage {
   width: number;
@@ -140,12 +145,26 @@ function tintFrame(image: RgbaImage, frame: number): Uint8Array {
 }
 
 export function encodeGifBase64(image: RgbaImage): string {
+  const scale = Math.min(1, 512 / Math.max(image.width, image.height));
+  const width = Math.max(1, Math.round(image.width * scale));
+  const height = Math.max(1, Math.round(image.height * scale));
+  const smallData = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const sourceX = Math.min(image.width - 1, Math.floor(x / scale));
+      const sourceY = Math.min(image.height - 1, Math.floor(y / scale));
+      const sourceOffset = (sourceY * image.width + sourceX) * 4;
+      const targetOffset = (y * width + x) * 4;
+      smallData.set(image.data.subarray(sourceOffset, sourceOffset + 4), targetOffset);
+    }
+  }
+  const gifImage: RgbaImage = { width, height, data: smallData };
   const encoder = GIFEncoder();
   for (let frame = 0; frame < 4; frame++) {
-    const rgba = tintFrame(image, frame);
+    const rgba = tintFrame(gifImage, frame);
     const palette = quantize(rgba, 128);
     const indexed = applyPalette(rgba, palette);
-    encoder.writeFrame(indexed, image.width, image.height, {
+    encoder.writeFrame(indexed, width, height, {
       palette,
       delay: 260,
       repeat: frame === 0 ? 0 : undefined,
