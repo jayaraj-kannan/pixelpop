@@ -1,0 +1,24 @@
+kind = "mobile"
+previewPath = "/"
+title = "Pixel Art Maker"
+description = "A mobile photo-to-pixel-art creator. Turn photos into pixel-style images, export as PNG or animated GIF, and share creations through messaging and social apps."
+version = "1.0.0"
+id = "artifacts/pixel-art-maker"
+router = "expo-domain"
+
+[[services]]
+name = "expo"
+ensurePreviewReachable = "/status"
+paths = [ "/" ]
+localPort = 19834
+
+[services.development]
+run = "pnpm --filter @workspace/pixel-art-maker run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/pixel-art-maker", "run", "build" ]
+run = [ "pnpm", "--filter", "@workspace/pixel-art-maker", "run", "serve" ]
+
+[services.env]
+PORT = "19834"
+BASE_PATH = "/"
