@@ -14,6 +14,7 @@ import {
   ActivityIndicator,
   Alert,
   Image,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -25,6 +26,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors } from '@/hooks/useColors';
 import { GifControls } from '@/src/components/GifControls';
 import { BackgroundControls, TransparencyGrid } from '@/src/components/BackgroundControls';
+import { PhotosPermissionError, saveExportToPhotos } from '@/src/lib/photo-library';
 import {
   applyAlphaMask,
   DEFAULT_GIF_OPTIONS,
@@ -84,6 +86,8 @@ export default function PixelArtHome() {
   const formatRef = useRef<ExportFormat>('png');
   const animationRef = useRef<GifOptions>(DEFAULT_GIF_OPTIONS);
   const previewBase64Ref = useRef<string | null>(null);
+  const exportedUriRef = useRef<string | null>(null);
+  const exportBusyRef = useRef(false);
   const [animation, setAnimation] = useState<GifOptions>(DEFAULT_GIF_OPTIONS);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
   const [selectedSavedUri, setSelectedSavedUri] = useState<string | null>(null);
@@ -94,6 +98,8 @@ export default function PixelArtHome() {
   const [hasCutout, setHasCutout] = useState(false);
   const [isRemovingBackground, setIsRemovingBackground] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [exportAction, setExportAction] = useState<'save' | 'share' | null>(null);
+  const [needsPhotoSettings, setNeedsPhotoSettings] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
   const [status, setStatus] = useState('');
   const [recent, setRecent] = useState<RecentCreation[]>([]);
@@ -123,6 +129,7 @@ export default function PixelArtHome() {
     setPreviewUri(`data:image/${activeFormat};base64,${base64}`);
     setIsDirty(false);
     setSelectedSavedUri(null);
+    exportedUriRef.current = null;
   }, []);
 
   const loadImage = useCallback(
@@ -130,6 +137,7 @@ export default function PixelArtHome() {
       setIsLoading(true);
       setStatus('');
       setSelectedSavedUri(null);
+      exportedUriRef.current = null;
       try {
         const info = dimensions ?? (await ImageManipulator.manipulateAsync(uri, [], { base64: false }));
         const manipulated = await ImageManipulator.manipulateAsync(
@@ -212,6 +220,7 @@ export default function PixelArtHome() {
     setPixelSize(nextValue);
     setIsDirty(true);
     setSelectedSavedUri(null);
+    exportedUriRef.current = null;
   };
 
   const applyPixelSize = async () => {
@@ -308,6 +317,16 @@ export default function PixelArtHome() {
     }
   };
 
+  const downloadUri = async (uri: string, selectedFormat: ExportFormat) => {
+    const response = await fetch(uri);
+    const blob = await response.blob();
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `pixel-pop.${selectedFormat}`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  };
+
   const shareUri = async (uri: string, selectedFormat: ExportFormat) => {
     if (Platform.OS === 'web') {
       const webNavigator = globalThis.navigator as Navigator & {
@@ -321,11 +340,7 @@ export default function PixelArtHome() {
       if (webNavigator.share && webNavigator.canShare?.({ files: [file] })) {
         await webNavigator.share({ files: [file], title: 'PixelPop' });
       } else {
-        const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
-        link.download = `pixel-pop.${selectedFormat}`;
-        link.click();
-        setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+        await downloadUri(uri, selectedFormat);
       }
       return;
     }
@@ -339,66 +354,92 @@ export default function PixelArtHome() {
     });
   };
 
-  const exportAndShare = async () => {
-    if (selectedSavedUri) {
-      try {
-        setIsExporting(true);
-        await shareUri(selectedSavedUri, format);
-      } catch (error) {
-        Alert.alert('Could not share', error instanceof Error ? error.message : 'Try again.');
-      } finally {
-        setIsExporting(false);
-      }
-      return;
-    }
-
+  const ensureExportUri = async (): Promise<string> => {
+    if (selectedSavedUri) return selectedSavedUri;
+    if (exportedUriRef.current) return exportedUriRef.current;
     const pixels = processedRef.current;
     if (!pixels) {
-      setStatus('Choose a photo before exporting.');
-      return;
+      throw new Error('Choose a photo before exporting.');
     }
-    setIsExporting(true);
-    setStatus('');
-    try {
-      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-      const base64 = previewBase64Ref.current ?? (format === 'gif'
-        ? encodeGifBase64(pixels, animationRef.current)
-        : encodePngBase64(pixels));
-      const mimeType = format === 'gif' ? 'image/gif' : 'image/png';
-      let uri: string;
+    const base64 = previewBase64Ref.current ?? (format === 'gif'
+      ? encodeGifBase64(pixels, animationRef.current)
+      : encodePngBase64(pixels));
+    const mimeType = format === 'gif' ? 'image/gif' : 'image/png';
+    let uri: string;
 
-      if (Platform.OS === 'web') {
-        uri = `data:${mimeType};base64,${base64}`;
-      } else {
-        if (!FileSystem.documentDirectory) {
-          throw new Error('Device storage is unavailable. Please try again.');
-        }
-        const folder = `${FileSystem.documentDirectory}PixelPop/`;
-        await FileSystem.makeDirectoryAsync(folder, { intermediates: true });
-        const filename = `pixel-pop-${Date.now()}.${format}`;
-        uri = `${folder}${filename}`;
-        await FileSystem.writeAsStringAsync(uri, base64, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
-        const newCreation: RecentCreation = {
-          id: `${Date.now()}`,
-          uri,
-          format,
-          createdAt: Date.now(),
-          transparent: hasCutout,
-        };
-        const updated = [newCreation, ...recent].slice(0, 12);
-        setRecent(updated);
-        await AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
+    if (Platform.OS === 'web') {
+      uri = `data:${mimeType};base64,${base64}`;
+    } else {
+      if (!FileSystem.documentDirectory) {
+        throw new Error('Device storage is unavailable. Please try again.');
       }
-      await shareUri(uri, format);
-      setStatus(format === 'gif' ? 'GIF exported and ready to share.' : 'PNG exported and ready to share.');
+      const folder = `${FileSystem.documentDirectory}PixelPop/`;
+      await FileSystem.makeDirectoryAsync(folder, { intermediates: true });
+      const filename = `pixel-pop-${Date.now()}.${format}`;
+      uri = `${folder}${filename}`;
+      await FileSystem.writeAsStringAsync(uri, base64, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      exportedUriRef.current = uri;
+      const newCreation: RecentCreation = {
+        id: `${Date.now()}`,
+        uri,
+        format,
+        createdAt: Date.now(),
+        transparent: hasCutout,
+      };
+      const updated = [newCreation, ...recent].slice(0, 12);
+      setRecent(updated);
+      await AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
+    }
+    return uri;
+  };
+
+  const exportArt = async (action: 'save' | 'share') => {
+    if (exportBusyRef.current || isLoading || isDirty || !previewUri) return;
+    exportBusyRef.current = true;
+    setIsExporting(true);
+    setExportAction(action);
+    setStatus('');
+    setNeedsPhotoSettings(false);
+    try {
+      const uri = await ensureExportUri();
+      if (action === 'share') {
+        await shareUri(uri, format);
+        setStatus(`${format.toUpperCase()} exported and ready to share.`);
+      } else if (Platform.OS === 'web') {
+        await downloadUri(uri, format);
+        setStatus(`${format.toUpperCase()} download started.`);
+      } else {
+        await saveExportToPhotos(uri);
+        setStatus(`${format.toUpperCase()} saved to Photos. You can still share the same export.`);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Please try exporting again.';
       setStatus(message);
-      Alert.alert('Export failed', message);
+      if (error instanceof PhotosPermissionError) {
+        setNeedsPhotoSettings(!error.canAskAgain);
+        Alert.alert('Photo permission needed', message, error.canAskAgain
+          ? [{ text: 'OK' }]
+          : [{ text: 'Not now', style: 'cancel' }, { text: 'Open Settings', onPress: () => void openPhotoSettings() }]);
+      } else {
+        Alert.alert(action === 'save' ? 'Could not save' : 'Could not share', message);
+      }
     } finally {
+      exportBusyRef.current = false;
       setIsExporting(false);
+      setExportAction(null);
+    }
+  };
+
+  const openPhotoSettings = async () => {
+    if (Platform.OS === 'web') return;
+    try {
+      await Linking.openSettings();
+    } catch {
+      const message = 'Could not open Settings. Open your device Settings and find PixelPop to change photo permission.';
+      setStatus(message);
+      Alert.alert('Could not open Settings', message);
     }
   };
 
@@ -411,12 +452,14 @@ export default function PixelArtHome() {
     setHasCutout(Boolean(item.transparent));
     processedRef.current = null;
     previewBase64Ref.current = null;
+    exportedUriRef.current = null;
     setSelectedSavedUri(item.uri);
     setPreviewUri(item.uri);
     setImageName('Recent creation');
     setFormat(item.format);
     formatRef.current = item.format;
     setIsDirty(false);
+    setStatus('');
   };
 
   const styles = makeStyles(colors);
@@ -654,7 +697,7 @@ export default function PixelArtHome() {
           accessibilityRole="button"
           accessibilityLabel={format === 'gif' ? 'Export and share GIF' : 'Export and share PNG'}
           testID="export-share"
-          onPress={() => void exportAndShare()}
+          onPress={() => void exportArt('share')}
           disabled={isLoading || isExporting || !previewUri || isDirty}
           style={({ pressed }) => [
             styles.exportButton,
@@ -668,7 +711,9 @@ export default function PixelArtHome() {
             <Feather name="send" size={18} color={colors.primaryForeground} />
           )}
           <Text style={styles.exportText}>
-            {isExporting
+            {exportAction === 'save'
+              ? 'Saving your art…'
+              : isExporting
               ? 'Preparing your art…'
               : isDirty
                 ? 'Update preview to export'
@@ -677,7 +722,38 @@ export default function PixelArtHome() {
           {!isExporting && <Feather name="arrow-up-right" size={17} color={colors.primaryForeground} />}
         </Pressable>
 
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={Platform.OS === 'web' ? `Download ${format.toUpperCase()}` : `Save ${format.toUpperCase()} to Photos`}
+          testID="save-photos"
+          onPress={() => void exportArt('save')}
+          disabled={isLoading || isExporting || !previewUri || isDirty}
+          style={({ pressed }) => [
+            styles.updateButton,
+            pressed && styles.pressed,
+            (isLoading || isExporting || !previewUri || isDirty) && styles.disabledButton,
+          ]}
+        >
+          {exportAction === 'save'
+            ? <ActivityIndicator color={colors.primaryForeground} />
+            : <Feather name="download" size={18} color={colors.primaryForeground} />}
+          <Text style={styles.updateText}>
+            {exportAction === 'save' ? 'Saving…' : Platform.OS === 'web' ? `Download ${format.toUpperCase()}` : 'Save to Photos'}
+          </Text>
+        </Pressable>
+
         {status ? <Text accessibilityRole="alert" style={styles.status}>{status}</Text> : null}
+        {needsPhotoSettings && Platform.OS !== 'web' && (
+          <Pressable
+            accessibilityRole="button"
+            testID="open-photo-settings"
+            onPress={() => void openPhotoSettings()}
+            style={styles.updateButton}
+          >
+            <Feather name="settings" size={16} color={colors.primaryForeground} />
+            <Text style={styles.updateText}>Open Settings</Text>
+          </Pressable>
+        )}
 
         {recent.length > 0 && (
           <View style={styles.recentSection}>

@@ -22,7 +22,16 @@
     "plugins": [
       "expo-router",
       "expo-sharing",
-      "expo-asset"
+      "expo-asset",
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Allow PixelPop to access photos only when you choose to use your photo library.",
+          "savePhotosPermission": "Allow PixelPop to save your pixel art PNGs and animated GIFs to your photo library.",
+          "granularPermissions": ["photo"],
+          "isAccessMediaLocationEnabled": false
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
