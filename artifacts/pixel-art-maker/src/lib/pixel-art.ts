@@ -131,20 +131,90 @@ export function encodePngBase64(image: RgbaImage): string {
   return Buffer.from(png).toString('base64');
 }
 
-function tintFrame(image: RgbaImage, frame: number): Uint8Array {
-  const tinted = new Uint8Array(image.data.length);
-  const phase = [0.94, 1.04, 1.1, 1][frame] ?? 1;
-  const warmShift = [4, 14, 0, -8][frame] ?? 0;
-  for (let i = 0; i < image.data.length; i += 4) {
-    tinted[i] = Math.min(255, Math.max(0, (image.data[i] ?? 0) * phase + warmShift));
-    tinted[i + 1] = Math.min(255, Math.max(0, (image.data[i + 1] ?? 0) * phase));
-    tinted[i + 2] = Math.min(255, Math.max(0, (image.data[i + 2] ?? 0) * phase - warmShift * 0.35));
-    tinted[i + 3] = image.data[i + 3] ?? 255;
-  }
-  return tinted;
+export type GifEffect = 'pulse' | 'bounce' | 'sway' | 'zoom' | 'wobble';
+export interface GifOptions {
+  effect: GifEffect;
+  speed: 'slow' | 'normal' | 'fast';
+  strength: 'gentle' | 'normal' | 'bold';
+}
+export const DEFAULT_GIF_OPTIONS: GifOptions = {
+  effect: 'pulse',
+  speed: 'normal',
+  strength: 'normal',
+};
+const GIF_FRAME_COUNT = 12;
+const STRENGTH = { gentle: 0.35, normal: 0.65, bold: 1 };
+const LOOP_DURATION = { slow: 2400, normal: 1440, fast: 840 };
+
+function pulseColor(color: number[], phase: number, strength: number): number[] {
+  const wave = Math.sin(phase) * strength;
+  const brightness = 1 + wave * 0.16;
+  const clamp = (value: number) => Math.max(0, Math.min(255, Math.round(value)));
+  return [
+    clamp((color[0] ?? 0) * brightness + wave * 14),
+    clamp((color[1] ?? 0) * brightness),
+    clamp((color[2] ?? 0) * brightness - wave * 6),
+  ];
 }
 
-export function encodeGifBase64(image: RgbaImage): string {
+/** Render a full frame with nearest-neighbor sampling to preserve pixel edges. */
+export function renderGifFrame(
+  image: RgbaImage,
+  frame: number,
+  options: GifOptions = DEFAULT_GIF_OPTIONS,
+): Uint8Array {
+  const phase = (frame / GIF_FRAME_COUNT) * Math.PI * 2;
+  const strength = STRENGTH[options.strength];
+  const wave = Math.sin(phase) * strength;
+  const output = new Uint8Array(image.data.length);
+  if (options.effect === 'pulse') {
+    for (let i = 0; i < image.data.length; i += 4) {
+      output.set(pulseColor(Array.from(image.data.subarray(i, i + 3)), phase, strength), i);
+      output[i + 3] = image.data[i + 3] ?? 255;
+    }
+    return output;
+  }
+  const dx = options.effect === 'sway' ? wave * image.width * 0.08 : 0;
+  const dy = options.effect === 'bounce' ? wave * image.height * 0.08 : 0;
+  const angle = options.effect === 'wobble' ? wave * 0.14 : 0;
+  const cosine = Math.cos(angle);
+  const sine = Math.sin(angle);
+  const zoom = options.effect === 'zoom'
+    ? 1 + (1 - Math.cos(phase)) * strength * 0.12
+    : 1;
+  // Overscan keeps the whole canvas filled when the photo moves or rotates.
+  const scale = Math.max(
+    zoom,
+    (Math.abs(cosine) * image.width + Math.abs(sine) * image.height
+      + 2 * Math.abs(cosine * dx + sine * dy)) / image.width,
+    (Math.abs(sine) * image.width + Math.abs(cosine) * image.height
+      + 2 * Math.abs(-sine * dx + cosine * dy)) / image.height,
+  );
+  for (let y = 0; y < image.height; y++) {
+    for (let x = 0; x < image.width; x++) {
+      const localX = x + 0.5 - image.width / 2 - dx;
+      const localY = y + 0.5 - image.height / 2 - dy;
+      const sourceX = Math.max(0, Math.min(image.width - 1, Math.floor(
+        (cosine * localX + sine * localY) / scale + image.width / 2,
+      )));
+      const sourceY = Math.max(0, Math.min(image.height - 1, Math.floor(
+        (-sine * localX + cosine * localY) / scale + image.height / 2,
+      )));
+      const source = (sourceY * image.width + sourceX) * 4;
+      const target = (y * image.width + x) * 4;
+      output[target] = image.data[source] ?? 0;
+      output[target + 1] = image.data[source + 1] ?? 0;
+      output[target + 2] = image.data[source + 2] ?? 0;
+      output[target + 3] = image.data[source + 3] ?? 255;
+    }
+  }
+  return output;
+}
+
+export function encodeGifBase64(
+  image: RgbaImage,
+  options: GifOptions = DEFAULT_GIF_OPTIONS,
+): string {
   const scale = Math.min(1, 512 / Math.max(image.width, image.height));
   const width = Math.max(1, Math.round(image.width * scale));
   const height = Math.max(1, Math.round(image.height * scale));
@@ -160,13 +230,22 @@ export function encodeGifBase64(image: RgbaImage): string {
   }
   const gifImage: RgbaImage = { width, height, data: smallData };
   const encoder = GIFEncoder();
-  for (let frame = 0; frame < 4; frame++) {
-    const rgba = tintFrame(gifImage, frame);
-    const palette = quantize(rgba, 128);
-    const indexed = applyPalette(rgba, palette);
+  const basePalette = quantize(gifImage.data, 128);
+  const sourceIndices = applyPalette(gifImage.data, basePalette);
+  const delay = LOOP_DURATION[options.speed] / GIF_FRAME_COUNT;
+  for (let frame = 0; frame < GIF_FRAME_COUNT; frame++) {
+    const isPulse = options.effect === 'pulse';
+    const palette = isPulse
+      ? basePalette.map((color) => pulseColor(
+        color, (frame / GIF_FRAME_COUNT) * Math.PI * 2, STRENGTH[options.strength],
+      ))
+      : basePalette;
+    const indexed = isPulse
+      ? sourceIndices
+      : applyPalette(renderGifFrame(gifImage, frame, options), palette);
     encoder.writeFrame(indexed, width, height, {
       palette,
-      delay: 260,
+      delay,
       repeat: frame === 0 ? 0 : undefined,
     });
   }

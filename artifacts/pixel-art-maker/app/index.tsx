@@ -21,11 +21,14 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors } from '@/hooks/useColors';
+import { GifControls } from '@/src/components/GifControls';
 import {
+  DEFAULT_GIF_OPTIONS,
   decodeJpeg,
   encodeGifBase64,
   encodePngBase64,
   pixelate,
+  type GifOptions,
   type RgbaImage,
 } from '@/src/lib/pixel-art';
 
@@ -71,6 +74,9 @@ export default function PixelArtHome() {
   const processedRef = useRef<RgbaImage | null>(null);
   const pixelSizeRef = useRef(18);
   const formatRef = useRef<ExportFormat>('png');
+  const animationRef = useRef<GifOptions>(DEFAULT_GIF_OPTIONS);
+  const previewBase64Ref = useRef<string | null>(null);
+  const [animation, setAnimation] = useState<GifOptions>(DEFAULT_GIF_OPTIONS);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
   const [selectedSavedUri, setSelectedSavedUri] = useState<string | null>(null);
   const [imageName, setImageName] = useState('Window cat');
@@ -84,9 +90,12 @@ export default function PixelArtHome() {
 
   const createPreview = useCallback((source: RgbaImage, nextPixelSize: number) => {
     const result = pixelate(source, nextPixelSize);
-    processedRef.current = result;
     const activeFormat = formatRef.current;
-    const base64 = activeFormat === 'gif' ? encodeGifBase64(result) : encodePngBase64(result);
+    const base64 = activeFormat === 'gif'
+      ? encodeGifBase64(result, animationRef.current)
+      : encodePngBase64(result);
+    processedRef.current = result;
+    previewBase64Ref.current = base64;
     setPreviewUri(`data:image/${activeFormat};base64,${base64}`);
     setIsDirty(false);
     setSelectedSavedUri(null);
@@ -169,7 +178,7 @@ export default function PixelArtHome() {
   }, [loadImage]);
 
   const adjustPixelSize = (change: number) => {
-    if (!originalRef.current) return;
+    if (!originalRef.current || isLoading || isExporting) return;
     const nextValue = Math.max(CELL_MIN, Math.min(CELL_MAX, pixelSize + change));
     pixelSizeRef.current = nextValue;
     setPixelSize(nextValue);
@@ -179,7 +188,7 @@ export default function PixelArtHome() {
 
   const applyPixelSize = async () => {
     const original = originalRef.current;
-    if (!original) return;
+    if (!original || isLoading || isExporting) return;
     setIsLoading(true);
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
     try {
@@ -194,14 +203,39 @@ export default function PixelArtHome() {
     if (selectedSavedUri || format === value) return;
     setFormat(value);
     formatRef.current = value;
-    const pixels = processedRef.current;
-    if (!pixels) return;
+    const original = originalRef.current;
+    if (!original) return;
     setIsLoading(true);
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
     try {
-      const base64 = value === 'gif' ? encodeGifBase64(pixels) : encodePngBase64(pixels);
-      setPreviewUri(`data:image/${value};base64,${base64}`);
+      createPreview(original, pixelSizeRef.current);
       await Haptics.selectionAsync();
+    } catch (error) {
+      setIsDirty(true);
+      setStatus(error instanceof Error ? error.message : 'Could not update the preview.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const changeAnimation = async (next: GifOptions) => {
+    if (isLoading || isExporting || selectedSavedUri) return;
+    const current = animationRef.current;
+    if (next.effect === current.effect && next.speed === current.speed
+      && next.strength === current.strength) return;
+    animationRef.current = next;
+    setAnimation(next);
+    const original = originalRef.current;
+    if (!original) return;
+    setIsLoading(true);
+    setStatus('');
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    try {
+      createPreview(original, pixelSizeRef.current);
+      await Haptics.selectionAsync();
+    } catch (error) {
+      setIsDirty(true);
+      setStatus(error instanceof Error ? error.message : 'Could not create the animation.');
     } finally {
       setIsLoading(false);
     }
@@ -260,7 +294,9 @@ export default function PixelArtHome() {
     setStatus('');
     try {
       await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-      const base64 = format === 'gif' ? encodeGifBase64(pixels) : encodePngBase64(pixels);
+      const base64 = previewBase64Ref.current ?? (format === 'gif'
+        ? encodeGifBase64(pixels, animationRef.current)
+        : encodePngBase64(pixels));
       const mimeType = format === 'gif' ? 'image/gif' : 'image/png';
       let uri: string;
 
@@ -299,8 +335,10 @@ export default function PixelArtHome() {
   };
 
   const selectRecent = (item: RecentCreation) => {
+    if (isLoading || isExporting) return;
     originalRef.current = null;
     processedRef.current = null;
+    previewBase64Ref.current = null;
     setSelectedSavedUri(item.uri);
     setPreviewUri(item.uri);
     setImageName('Recent creation');
@@ -431,11 +469,11 @@ export default function PixelArtHome() {
               accessibilityLabel="Make pixels finer"
               testID="pixel-size-decrease"
               onPress={() => adjustPixelSize(-3)}
-              disabled={!originalRef.current || Boolean(selectedSavedUri) || pixelSize <= CELL_MIN}
+              disabled={!originalRef.current || Boolean(selectedSavedUri) || isLoading || isExporting || pixelSize <= CELL_MIN}
               style={({ pressed }) => [
                 styles.adjustButton,
                 pressed && styles.pressed,
-                (!originalRef.current || selectedSavedUri || pixelSize <= CELL_MIN) && styles.disabledButton,
+                (!originalRef.current || selectedSavedUri || isLoading || isExporting || pixelSize <= CELL_MIN) && styles.disabledButton,
               ]}
             >
               <Feather name="minus" size={17} color={colors.foreground} />
@@ -465,11 +503,11 @@ export default function PixelArtHome() {
               accessibilityLabel="Make pixels chunkier"
               testID="pixel-size-increase"
               onPress={() => adjustPixelSize(3)}
-              disabled={!originalRef.current || Boolean(selectedSavedUri) || pixelSize >= CELL_MAX}
+              disabled={!originalRef.current || Boolean(selectedSavedUri) || isLoading || isExporting || pixelSize >= CELL_MAX}
               style={({ pressed }) => [
                 styles.adjustButton,
                 pressed && styles.pressed,
-                (!originalRef.current || selectedSavedUri || pixelSize >= CELL_MAX) && styles.disabledButton,
+                (!originalRef.current || selectedSavedUri || isLoading || isExporting || pixelSize >= CELL_MAX) && styles.disabledButton,
               ]}
             >
               <Feather name="plus" size={17} color={colors.foreground} />
@@ -504,8 +542,15 @@ export default function PixelArtHome() {
           </View>
         </View>
 
-        {format === 'gif' && (
-          <Text style={styles.gifHint}>GIF adds a gentle, looping color pulse.</Text>
+        {format === 'gif' && !selectedSavedUri && (
+          <GifControls
+            value={animation}
+            disabled={isLoading || isExporting || !originalRef.current}
+            onChange={(next) => void changeAnimation(next)}
+          />
+        )}
+        {format === 'gif' && selectedSavedUri && (
+          <Text style={styles.gifHint}>Saved animation ready to share. Choose a photo to make a new one.</Text>
         )}
 
         {isDirty && (
@@ -513,7 +558,8 @@ export default function PixelArtHome() {
             accessibilityRole="button"
             testID="apply-pixel-size"
             onPress={() => void applyPixelSize()}
-            style={({ pressed }) => [styles.updateButton, pressed && styles.pressed]}
+            disabled={isLoading || isExporting}
+            style={({ pressed }) => [styles.updateButton, pressed && styles.pressed, (isLoading || isExporting) && styles.disabledButton]}
           >
             <Feather name="refresh-cw" size={16} color={colors.primaryForeground} />
             <Text style={styles.updateText}>Update preview</Text>
@@ -561,6 +607,7 @@ export default function PixelArtHome() {
                   key={item.id}
                   accessibilityRole="button"
                   accessibilityLabel={`Open recent ${item.format.toUpperCase()} creation`}
+                  disabled={isLoading || isExporting}
                   testID={`recent-${item.id}`}
                   onPress={() => selectRecent(item)}
                   style={({ pressed }) => [styles.recentItem, pressed && styles.pressed]}

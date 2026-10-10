@@ -31,7 +31,7 @@ PixelPop turns photos into pixel-art PNGs and looping GIFs, then shares them thr
 
 - Process photos on-device; no photo-upload API is used. Keep this privacy promise when adding features.
 - Export PNG at up to 1024 pixels on the longest side and GIF at up to 512 pixels to keep sharing practical.
-- GIFs use a looping color pulse rather than inventing motion within a still photo.
+- GIFs offer color pulse, bounce, sway, zoom, and wobble, with adjustable speed and strength. These are local full-photo transforms, not AI-generated subject motion. Nearest-neighbor sampling preserves pixel edges; motion gently crops to keep the canvas filled.
 - Use native sharing for installed compatible apps. Do not promise that every app will accept every format.
 
 ## Product
